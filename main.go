@@ -9,18 +9,27 @@ import (
 	"strings"
 	"time"
 
+	"bytes"
+	"path/filepath"
+	"strconv"
+	"text/template"
+
 	"github.com/bountylabs/log"
 )
 
 var path string
 var repo string
-var p string
+var pkg string
+var tsformat string
+var versionstr string
 var short bool
 
 func init() {
 	flag.StringVar(&path, "o", "version.go", "filename")
-	flag.StringVar(&repo, "i", ".", "repository")
-	flag.StringVar(&p, "p", "version", "package")
+	flag.StringVar(&repo, "i", ".", "repository path")
+	flag.StringVar(&pkg, "p", "version", "package")
+	flag.StringVar(&tsformat, "tf", "", "timestamp format")
+	flag.StringVar(&versionstr, "v", "", "version string")
 	flag.BoolVar(&short, "s", false, "--s")
 }
 
@@ -33,38 +42,106 @@ func stripchars(str, chr string) string {
 	}, str)
 }
 
+// looks for git root in gitDir or above
+func findgitroot(gitDir string) (string, error) {
+	gitDir = filepath.Clean(gitDir)
+	gitpath := gitDir + "/.git"
+
+	for {
+		_, err := os.Stat(gitpath)
+		if err == nil {
+			return gitpath, nil // found
+		}
+
+		dir := filepath.Dir(gitpath)
+		// at filesystem root...not found
+		if strings.HasSuffix(dir, "/") || strings.HasSuffix(dir, "\\") {
+			return "", fmt.Errorf("No gitroot found at or above path %s", gitDir)
+		}
+
+		if os.IsNotExist(err) {
+			gitpath = filepath.Clean(dir + "/../.git")
+			continue
+		}
+	}
+}
+
 func main() {
 
 	flag.Parse()
 
-	//get commit hash (short or not)
-	cmd := func() *exec.Cmd {
-		if short {
-			return exec.Command("git", "--git-dir", repo+"/.git", "rev-parse", "--short", "HEAD")
-		}
-
-		return exec.Command("git", "--git-dir", repo+"/.git", "rev-parse", "HEAD")
-	}()
-
-	bytes, err := cmd.CombinedOutput()
+	gitrepo, err := findgitroot(repo)
 	if err != nil {
 		log.Errorln(err)
 		os.Exit(1)
 		return
 	}
 
-	//create template
-	file_contents := fmt.Sprintf(Template, p, stripchars(string(bytes), "\r\n "), time.Now().UnixNano())
+	//get commit hash (short or not)
+	cmd := func() *exec.Cmd {
+		if short {
+			return exec.Command("git", "--git-dir", gitrepo, "rev-parse", "--short", "HEAD")
+		}
 
-	//write template
-	if err = ioutil.WriteFile(path, []byte(file_contents), 0644); err != nil {
+		return exec.Command("git", "--git-dir", gitrepo, "rev-parse", "HEAD")
+	}()
+
+	cmdOut, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Errorln(err)
+		os.Exit(1)
+		return
+	}
+
+	// generate timestamp
+	tsUnix := strconv.FormatInt(time.Now().Unix(), 10)
+	var tsFmt string
+	if tsformat != "" {
+		tsFmt = time.Now().Format(tsformat)
+	}
+
+	// map of values for template
+	vals := make(map[string]string)
+	vals["githash"] = stripchars(string(cmdOut), "\r\n ")
+	vals["ts"] = tsUnix
+	vals["tsformat"] = tsFmt
+	vals["pkg"] = pkg
+	vals["versionstr"] = versionstr
+
+	// create template
+	tmpl, err := template.New("ver").Parse(Template)
+	if err != nil {
+		log.Errorln(err)
+		os.Exit(1)
+		return
+	}
+
+	// execute template
+	var b bytes.Buffer
+	if err = tmpl.Execute(&b, vals); err != nil {
+		log.Errorln(err)
+		os.Exit(1)
+		return
+	}
+
+	//write file
+	if err = ioutil.WriteFile(path, b.Bytes(), 0644); err != nil {
 		log.Errorln(err)
 		os.Exit(1)
 	}
 }
 
-var Template = `package %s
+var Template = `package {{.pkg}}
 
-var GIT_COMMIT_HASH = "%s"
-var GENERATED = %d
+const (
+	GIT_COMMIT_HASH = "{{.githash}}"
+
+	// Unix time (seconds since January 1, 1970 UTC)
+	GENERATED = {{.ts}}
+{{if .tsformat}}
+	// human readable timestamp
+	GENERATED_FMT = "{{.tsformat}}"{{end}}
+{{if .versionstr}}
+	VERSION = "{{.versionstr}}"{{end}}
+)
 `

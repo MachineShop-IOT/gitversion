@@ -23,3 +23,8 @@ _testmain.go
 *.exe
 *.test
 *.swp
+
+# IDE metadata
+**/.settings/
+**/.idea/
+**/*.iml
